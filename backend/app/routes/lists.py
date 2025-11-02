@@ -1,3 +1,7 @@
+"""
+Custom Lists Router - Provides high-level list management endpoints
+Maps to list_requests table in Supabase
+"""
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
 from app.core.database import get_supabase_client
@@ -228,11 +232,10 @@ def add_items_to_list(list_id: int, payload: Dict[str, Any]):
     try:
         items = payload.get('items', [])
         updated_by = payload.get('updated_by', 'Unknown')
-        
+
         print(f"[DEBUG] Adding items to list {list_id}")
         print(f"[DEBUG] Number of items: {len(items)}")
-        print(f"[DEBUG] First item sample: {items[0] if items else 'No items'}")
-        
+
         if not items:
             raise HTTPException(status_code=400, detail='No items provided')
         
@@ -269,20 +272,25 @@ def add_items_to_list(list_id: int, payload: Dict[str, Any]):
             raise HTTPException(status_code=400, detail=f'Unknown subdomain: {subdomain_name}')
         
         print(f"[DEBUG] Using entry table: {entry_table}")
-        
-        # Get the latest version number
-        version_resp = sb.table('list_versions').select('version_number').eq('request_id', list_id).order('version_number', desc=True).limit(1).execute()
+
+        # ✅ Get the latest version for this specific list
+        version_resp = sb.table('list_versions') \
+            .select('version_number') \
+            .eq('request_id', list_id) \
+            .order('version_number', desc=True) \
+            .limit(1) \
+            .execute()
+
         next_version = 1
         if version_resp.data and len(version_resp.data) > 0:
             next_version = version_resp.data[0]['version_number'] + 1
-        
-        print(f"[DEBUG] Creating version: {next_version}")
-        
-        # Set all previous versions to is_current = False
-        print(f"[DEBUG] Setting previous versions to is_current=False")
+
+        print(f"[DEBUG] Creating new version: {next_version}")
+
+        # Set all previous versions to is_current=False for this list
         sb.table('list_versions').update({'is_current': False}).eq('request_id', list_id).execute()
-        
-        # Create new version
+
+        # ✅ Create a new version record
         version_data = {
             'request_id': list_id,
             'version_number': next_version,
@@ -292,57 +300,38 @@ def add_items_to_list(list_id: int, payload: Dict[str, Any]):
             'is_current': True
         }
         version_insert = sb.table('list_versions').insert(version_data).execute()
-        
+
         if not version_insert.data or len(version_insert.data) == 0:
             raise HTTPException(status_code=500, detail='Failed to create version')
-        
-        version_id = version_insert.data[0]['version_id']
+
+        # ✅ FIX: use correct primary key name from list_versions table
+        version_row = version_insert.data[0]
+        version_id = version_row.get('id') or version_row.get('version_id')
+
+        if not version_id:
+            raise HTTPException(status_code=500, detail='Version ID not returned from database')
+
         print(f"[DEBUG] Created version_id: {version_id}")
-        
-        # Insert items into the appropriate entry table
-        # Add version_id to each item
+
+        # ✅ Add version_id to every item
         items_with_version = [{**item, 'version_id': version_id} for item in items]
-        
+
         print(f"[DEBUG] Inserting {len(items_with_version)} items into {entry_table}")
-        print(f"[DEBUG] Sample item with version: {items_with_version[0] if items_with_version else 'No items'}")
-        print(f"[DEBUG] All items with version_id: {items_with_version}")
-        
+
         try:
             items_resp = sb.table(entry_table).insert(items_with_version).execute()
-            print(f"[DEBUG] Insert response type: {type(items_resp)}")
-            print(f"[DEBUG] Insert response data: {items_resp.data if hasattr(items_resp, 'data') else 'No data attribute'}")
-            print(f"[DEBUG] Insert response full: {items_resp}")
         except Exception as insert_error:
-            print(f"[ERROR] Insert failed with error: {str(insert_error)}")
-            print(f"[ERROR] Error type: {type(insert_error)}")
+            print(f"[ERROR] Insert failed: {insert_error}")
             import traceback
-            print(f"[ERROR] Traceback: {traceback.format_exc()}")
-            
-            # Extract meaningful error message for the user
-            error_msg = str(insert_error)
-            if 'check constraint' in error_msg.lower():
-                # Extract the constraint name and provide helpful message
-                if 'importance_check' in error_msg:
-                    error_msg = 'Invalid value for "importance" field. Expected values: Tier 1, Tier 2, or Tier 3'
-                elif 'tier_check' in error_msg:
-                    error_msg = 'Invalid value for "tier" field. Expected values: A, B, or C'
-                elif 'influence_level_check' in error_msg:
-                    error_msg = 'Invalid value for "influence_level" field. Expected values: High, Medium, or Low'
-                elif 'conversion_potential_check' in error_msg:
-                    error_msg = 'Invalid value for "conversion_potential" field. Expected values: High, Medium, or Low'
-                else:
-                    error_msg = f'Data validation error: One or more fields contain invalid values. Please check your CSV file matches the sample template.'
-            
-            raise HTTPException(status_code=400, detail=error_msg)
-        
-        # Verify items were actually inserted
+            print(traceback.format_exc())
+            raise HTTPException(status_code=400, detail=str(insert_error))
+
         inserted_count = len(items_resp.data) if hasattr(items_resp, 'data') and items_resp.data else 0
-        print(f"[DEBUG] Successfully inserted {inserted_count} items")
-        
+        print(f"[DEBUG] Successfully inserted {inserted_count} items into {entry_table}")
+
         if inserted_count == 0:
-            print(f"[WARNING] No items were inserted into {entry_table}")
-            raise HTTPException(status_code=500, detail='Failed to insert items into database')
-        
+            raise HTTPException(status_code=500, detail='No items inserted into database')
+
         return {
             'success': True,
             'version_id': version_id,
@@ -350,13 +339,13 @@ def add_items_to_list(list_id: int, payload: Dict[str, Any]):
             'items_added': inserted_count,
             'table_used': entry_table
         }
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"[ERROR] Exception in add_items_to_list: {str(e)}")
-        print(f"[ERROR] Exception type: {type(e)}")
         import traceback
-        print(f"[ERROR] Traceback: {traceback.format_exc()}")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 
